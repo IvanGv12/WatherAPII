@@ -1,533 +1,645 @@
-# Design Document — weather-app-react
+# Design Document: Weather App React
 
 ## Overview
 
-La feature **weather-app-react** es una Single Page Application (SPA) construida en React 19 que permite a los usuarios consultar el clima actual de cualquier ciudad del mundo, ya sea escribiendo el nombre de la ciudad o usando la geolocalización del navegador. La aplicación consume directamente la API pública de [WeatherAPI](https://www.weatherapi.com/) (`api.weatherapi.com`) desde el frontend, sin pasar por el backend Laravel para las consultas climáticas.
+Aplicación 100% frontend construida con React + Vite que permite a los usuarios registrarse, iniciar sesión y consultar el clima actual de cualquier ciudad mediante la API de WeatherAPI.com. Toda la persistencia (usuarios, sesión activa e historial de búsquedas) se gestiona en `localStorage`, sin ningún backend externo.
 
-### Objetivos principales
-
-- Proporcionar una interfaz de búsqueda de ciudades clara y accesible.
-- Mostrar datos climáticos actuales (temperatura, sensación térmica, condición, humedad, viento, ciudad/país).
-- Manejar errores de forma descriptiva (ciudad no encontrada, autenticación fallida, error de red).
-- Mostrar un indicador de carga durante las solicitudes.
-- Encapsular toda la lógica HTTP en `weatherService.js`.
-- Soportar geolocalización del dispositivo como alternativa a la búsqueda manual.
-
-### Contexto tecnológico
-
-| Capa | Tecnología |
-|---|---|
-| Frontend | React 19 + Vite |
-| HTTP client | axios ^1.15 |
-| API externa | WeatherAPI (`api.weatherapi.com/v1`) |
-| Backend (soporte) | Laravel 11 + Breeze (auth, favoritos) |
-| Testing | Vitest + React Testing Library + fast-check (PBT) |
+El proyecto ya cuenta con una base funcional: componentes `Login`, `Register`, `Search`, `WeatherCard` y `Forecast`, junto con los servicios `localAuth.js` (autenticación en localStorage) y `weatherService.js` (llamadas a WeatherAPI). El diseño formaliza la arquitectura existente, identifica las piezas faltantes (historial de búsquedas, pronóstico extendido, contexto de autenticación) y define las interfaces y contratos necesarios para completar la feature.
 
 ---
 
 ## Architecture
 
-La arquitectura sigue un patrón de **capas desacopladas** dentro del frontend React:
+### Vista de alto nivel
 
+```mermaid
+graph TD
+    subgraph Browser
+        subgraph React App
+            A[main.jsx] --> B[App.jsx]
+            B --> C[AuthContext]
+            B --> D[React Router]
+            D --> E[/login → Login.jsx]
+            D --> F[/register → Register.jsx]
+            D --> G[/ → Dashboard.jsx]
+            G --> H[Search.jsx]
+            G --> I[WeatherCard.jsx]
+            G --> J[Forecast.jsx]
+            G --> K[SearchHistory.jsx]
+        end
+        subgraph Services
+            L[localAuth.js]
+            M[weatherService.js]
+            N[historyService.js]
+        end
+        subgraph Storage
+            O[(localStorage)]
+        end
+    end
+    subgraph External
+        P[WeatherAPI.com\n/current.json\n/forecast.json]
+    end
+
+    C --> L
+    L --> O
+    N --> O
+    M --> P
+    G --> M
+    G --> N
 ```
-┌─────────────────────────────────────────────────────┐
-│                    App.jsx (root)                   │
-│  Estado global: weather, error, loading, city       │
-│  Orquesta: handleSearch, handleLocation             │
-└────────────┬──────────────────────┬─────────────────┘
-             │                      │
-    ┌────────▼────────┐    ┌────────▼────────┐
-    │  Search.jsx     │    │  WeatherCard.jsx │
-    │  (entrada)      │    │  (presentación) │
-    └────────┬────────┘    └─────────────────┘
-             │
-    ┌────────▼────────────────────────────────────────┐
-    │           weatherService.js                     │
-    │  getWeather(query: string) → WeatherData        │
-    │  Encapsula axios + API_KEY + error mapping      │
-    └────────────────────┬────────────────────────────┘
-                         │ HTTPS GET
-                ┌────────▼────────┐
-                │   WeatherAPI    │
-                │ api.weatherapi  │
-                │ .com/v1/current │
-                └─────────────────┘
+
+### Flujo de autenticación
+
+```mermaid
+sequenceDiagram
+    participant U as Usuario
+    participant App as App.jsx
+    participant Auth as localAuth.js
+    participant LS as localStorage
+
+    U->>App: Abre la app
+    App->>Auth: getUser()
+    Auth->>LS: getItem("weatherAppCurrentUser")
+    LS-->>Auth: user | null
+    Auth-->>App: user | null
+    App-->>U: Redirige a /login o muestra Dashboard
+
+    U->>App: Envía formulario de login
+    App->>Auth: login(email, password)
+    Auth->>LS: getItem("weatherAppUsers")
+    LS-->>Auth: users[]
+    Auth->>LS: setItem("weatherAppCurrentUser", user)
+    Auth-->>App: { id, name, email }
+    App-->>U: Redirige a /
 ```
 
-### Flujo de datos principal
+### Flujo de búsqueda de clima
 
-1. El usuario escribe una ciudad en `Search` o activa la geolocalización.
-2. `App.jsx` recibe el evento, activa `loading = true` y llama a `weatherService.getWeather(query)`.
-3. `weatherService` realiza el GET a WeatherAPI con la API_Key y el query.
-4. Si la respuesta es exitosa, `App.jsx` actualiza `weather` y limpia `error`.
-5. Si hay error, `weatherService` lanza una excepción tipificada y `App.jsx` actualiza `error`.
-6. En ambos casos, `loading = false` al finalizar.
-7. `WeatherCard` renderiza los datos cuando `weather !== null`.
+```mermaid
+sequenceDiagram
+    participant U as Usuario
+    participant S as Search.jsx
+    participant App as App.jsx / Dashboard
+    participant WS as weatherService.js
+    participant HS as historyService.js
+    participant API as WeatherAPI.com
+    participant LS as localStorage
 
-### Decisiones de diseño
-
-- **API Key en el frontend**: La API Key de WeatherAPI se almacena en una variable de entorno de Vite (`VITE_WEATHER_API_KEY`). Esto es aceptable para una API pública de clima con rate limiting por key. No se expone en el código fuente.
-- **Sin proxy Laravel para clima**: La consulta climática va directamente al frontend para evitar latencia adicional y simplificar el flujo. El backend Laravel queda disponible para funcionalidades futuras (favoritos, historial).
-- **Manejo de errores en el servicio**: `weatherService` mapea los códigos HTTP y de error de WeatherAPI a mensajes de usuario descriptivos, manteniendo los componentes agnósticos a los detalles de la API.
-- **Estado en App.jsx**: El estado global de la aplicación (weather, error, loading) vive en el componente raíz para facilitar la coordinación entre `Search` y `WeatherCard`.
+    U->>S: Escribe ciudad y presiona Buscar
+    S->>App: onSearch(city)
+    App->>WS: getWeather(city)
+    WS->>API: GET /current.json?q=city
+    API-->>WS: WeatherData | error
+    WS-->>App: WeatherData | WeatherServiceError
+    App->>HS: addEntry(userId, city, WeatherData)
+    HS->>LS: setItem("weatherHistory_<userId>", entries[])
+    App-->>U: Renderiza WeatherCard + Forecast
+```
 
 ---
 
 ## Components and Interfaces
 
-### `App.jsx` — Componente raíz
+### App.jsx — Orquestador raíz
 
-Orquesta el estado global y los handlers de eventos.
+**Propósito**: Inicializa el router, provee el contexto de autenticación y conecta los handlers de negocio con los componentes de UI.
 
-```jsx
-// Estado
-const [weather, setWeather] = useState(null);   // WeatherData | null
-const [error, setError]     = useState("");      // string
-const [loading, setLoading] = useState(false);   // boolean
+**Responsabilidades**:
+- Cargar la sesión activa al montar (`getUser()`)
+- Manejar login, register y logout delegando a `localAuth.js`
+- Manejar búsquedas de clima delegando a `weatherService.js`
+- Guardar entradas en el historial delegando a `historyService.js`
+- Proteger rutas: redirigir a `/login` si no hay sesión
 
-// Handlers
-handleSearch(city: string): Promise<void>
-handleLocation(): void
+**Estado interno**:
+```typescript
+interface AppState {
+  user: User | null
+  authLoading: boolean
+  actionLoading: boolean
+  authError: string
+  weather: WeatherData | null
+  weatherLoading: boolean
+  weatherError: string
+  history: HistoryEntry[]
+}
 ```
-
-**Responsabilidades:**
-- Gestionar el ciclo de vida de una búsqueda (loading → data/error → idle).
-- Ocultar datos previos cuando hay un error nuevo (Req 3.4).
-- Limpiar el error cuando una búsqueda es exitosa (Req 3.5).
-- Detectar soporte de geolocalización y condicionar la visibilidad del botón (Req 6.4).
 
 ---
 
-### `Search.jsx` — Componente de búsqueda
+### Search.jsx
 
-Recibe input del usuario y dispara la búsqueda.
+**Propósito**: Campo de texto + botón para iniciar una búsqueda de clima.
 
-```jsx
-// Props
+**Props**:
+```typescript
 interface SearchProps {
-  onSearch: (city: string) => void;
-  loading: boolean;          // deshabilita el botón durante carga
+  onSearch: (city: string) => void
+  loading: boolean
 }
-
-// Estado interno
-const [city, setCity] = useState("");
 ```
 
-**Comportamiento:**
-- Renderiza `<input type="text">` y `<button type="submit">` (Req 1.1).
-- Dispara `onSearch(city)` al presionar Enter o hacer clic en el botón (Req 1.2, 1.3).
-- Si `city.trim() === ""`, muestra el mensaje de validación "Escribe una ciudad" sin llamar a `onSearch` (Req 1.4).
-- Limpia el campo tras una búsqueda exitosa (Req 1.5) — el padre notifica el éxito a través de un prop o el componente limpia tras invocar `onSearch`.
-- El botón queda `disabled` cuando `loading === true` (Req 4.3).
+**Responsabilidades**:
+- Validar que el campo no esté vacío antes de llamar `onSearch`
+- Limpiar el campo tras una búsqueda exitosa
+- Mostrar mensaje de error de validación inline
+- Deshabilitar el botón mientras `loading === true`
 
 ---
 
-### `WeatherCard.jsx` — Tarjeta de clima actual
+### WeatherCard.jsx
 
-Componente de presentación pura que muestra los datos climáticos.
+**Propósito**: Muestra los datos del clima actual de una ciudad.
 
-```jsx
-// Props
+**Props**:
+```typescript
 interface WeatherCardProps {
-  data: WeatherData | null;
+  data: WeatherData | null
 }
 ```
 
-**Datos mostrados** (Req 2.2–2.7):
-- Nombre de ciudad y país: `data.location.name`, `data.location.country`
-- Temperatura actual: `data.current.temp_c` °C
-- Sensación térmica: `data.current.feelslike_c` °C
-- Condición: `data.current.condition.text`
-- Humedad: `data.current.humidity` %
-- Viento: `data.current.wind_kph` km/h
-- Ícono de condición: `data.current.condition.icon`
-
-Retorna `null` si `data` es `null`.
+**Datos mostrados**:
+- Nombre de ciudad y país
+- Temperatura actual (°C)
+- Sensación térmica (°C)
+- Condición (texto + ícono)
+- Humedad (%)
+- Velocidad del viento (km/h)
 
 ---
 
-### `weatherService.js` — Servicio HTTP
+### Forecast.jsx
 
-Encapsula toda la comunicación con WeatherAPI.
+**Propósito**: Muestra el pronóstico extendido de los próximos días.
 
-```js
-// Interfaz pública
-export async function getWeather(query: string): Promise<WeatherData>
+**Props**:
+```typescript
+interface ForecastProps {
+  data: ForecastData | null
+}
 ```
 
-**Contrato:**
-- `query` puede ser un nombre de ciudad (`"London"`) o coordenadas (`"51.5,-0.1"`).
-- Incluye `VITE_WEATHER_API_KEY` en cada solicitud (Req 5.2).
-- Usa `axios` para el GET (Req 5.4).
-- Si la respuesta HTTP no es 200, lanza un `WeatherServiceError` con `type` y `message` (Req 5.3).
-- Mapeo de errores:
-  - HTTP 400 / error code 1006 → `type: "NOT_FOUND"` → mensaje "Ciudad no encontrada"
-  - HTTP 401 / 403 → `type: "AUTH_ERROR"` → mensaje "Error de autenticación con el servicio de clima"
-  - Error de red / timeout → `type: "NETWORK_ERROR"` → mensaje "No se pudo conectar con el servicio de clima. Intenta de nuevo."
+**Datos mostrados por día**:
+- Fecha
+- Temperatura promedio (°C)
+- Condición (texto + ícono)
+
+> **Nota**: El endpoint actual (`/current.json`) no incluye pronóstico. Se debe migrar a `/forecast.json?days=5` o hacer una segunda llamada.
 
 ---
 
-### `LoadingSpinner` — Indicador de carga (inline o componente)
+### SearchHistory.jsx *(componente nuevo)*
 
-Puede implementarse como un componente simple o inline en `App.jsx`.
+**Propósito**: Lista las últimas búsquedas del usuario con opción de repetirlas.
 
-```jsx
-// Renderizado condicional en App.jsx
-{loading && <div className="spinner" aria-label="Cargando..." role="status" />}
+**Props**:
+```typescript
+interface SearchHistoryProps {
+  entries: HistoryEntry[]
+  onSelect: (city: string) => void
+  onClear: () => void
+}
+```
+
+**Responsabilidades**:
+- Mostrar las últimas N entradas (máx. 10) en orden cronológico inverso
+- Permitir hacer clic en una entrada para repetir la búsqueda
+- Botón para limpiar todo el historial del usuario
+
+---
+
+### Login.jsx
+
+**Props** (sin cambios):
+```typescript
+interface LoginProps {
+  onLogin: (email: string, password: string) => Promise<void>
+  loading: boolean
+  error: string
+}
+```
+
+---
+
+### Register.jsx
+
+**Props** (sin cambios):
+```typescript
+interface RegisterProps {
+  onRegister: (name: string, email: string, password: string, passwordConfirmation: string) => Promise<void>
+  loading: boolean
+  error: string
+}
 ```
 
 ---
 
 ## Data Models
 
-### `WeatherData` — Respuesta de WeatherAPI (subconjunto usado)
+### User
+
+```typescript
+interface User {
+  id: number          // Date.now() al registrar
+  name: string
+  email: string
+  // password NO se expone fuera de localAuth.js
+}
+```
+
+**Reglas de validación**:
+- `name`: no vacío
+- `email`: formato válido, único en el sistema
+- `password`: mínimo 6 caracteres
+
+---
+
+### WeatherData (respuesta de WeatherAPI `/current.json`)
 
 ```typescript
 interface WeatherData {
   location: {
-    name: string;       // "London"
-    country: string;    // "United Kingdom"
-    lat: number;
-    lon: number;
-  };
+    name: string
+    country: string
+    lat: number
+    lon: number
+    localtime: string
+  }
   current: {
-    temp_c: number;         // 18.5
-    feelslike_c: number;    // 16.2
-    humidity: number;       // 72  (porcentaje)
-    wind_kph: number;       // 14.4
+    temp_c: number
+    feelslike_c: number
+    humidity: number
+    wind_kph: number
     condition: {
-      text: string;         // "Partly cloudy"
-      icon: string;         // "//cdn.weatherapi.com/weather/64x64/day/116.png"
-      code: number;         // 1003
-    };
-  };
-}
-```
-
-### `WeatherServiceError` — Error tipificado del servicio
-
-```typescript
-type WeatherErrorType = "NOT_FOUND" | "AUTH_ERROR" | "NETWORK_ERROR";
-
-class WeatherServiceError extends Error {
-  type: WeatherErrorType;
-  constructor(type: WeatherErrorType, message: string) {
-    super(message);
-    this.type = type;
+      text: string
+      icon: string
+      code: number
+    }
   }
 }
 ```
 
-### Estado de la aplicación (`App.jsx`)
+---
+
+### ForecastData (respuesta de WeatherAPI `/forecast.json`)
 
 ```typescript
-interface AppState {
-  weather: WeatherData | null;  // null = sin datos / error
-  error: string;                // "" = sin error
-  loading: boolean;             // true durante solicitud activa
+interface ForecastData extends WeatherData {
+  forecast: {
+    forecastday: Array<{
+      date: string
+      day: {
+        avgtemp_c: number
+        condition: {
+          text: string
+          icon: string
+        }
+      }
+    }>
+  }
 }
 ```
 
-### Mapeo de errores del servicio a mensajes de UI
+---
 
-| `WeatherErrorType` | Mensaje mostrado al usuario |
-|---|---|
-| `NOT_FOUND` | "Ciudad no encontrada" |
-| `AUTH_ERROR` | "Error de autenticación con el servicio de clima" |
-| `NETWORK_ERROR` | "No se pudo conectar con el servicio de clima. Intenta de nuevo." |
-| Geoloc denegada | "Permiso de ubicación denegado" |
+### HistoryEntry
 
+```typescript
+interface HistoryEntry {
+  id: string            // crypto.randomUUID() o Date.now().toString()
+  userId: number
+  city: string          // nombre normalizado de la ciudad buscada
+  searchedAt: string    // ISO 8601
+  weatherSnapshot: {
+    temp_c: number
+    condition: string
+    icon: string
+  }
+}
+```
+
+**Reglas**:
+- Máximo 50 entradas por usuario (FIFO: se elimina la más antigua)
+- Clave en localStorage: `weatherHistory_<userId>`
 
 ---
 
-## Correctness Properties
+## Key Functions with Formal Specifications
 
-*Una propiedad es una característica o comportamiento que debe mantenerse verdadero en todas las ejecuciones válidas del sistema — esencialmente, una declaración formal sobre lo que el sistema debe hacer. Las propiedades sirven como puente entre las especificaciones legibles por humanos y las garantías de corrección verificables por máquinas.*
+### `getWeather(query: string): Promise<WeatherData>`
 
-La feature weather-app-react involucra lógica de transformación de datos, validación de entradas, mapeo de errores y renderizado condicional — todas áreas donde el property-based testing aporta valor al verificar invariantes sobre un amplio espacio de entradas. Se utiliza **fast-check** como librería de PBT para JavaScript/TypeScript.
+**Precondiciones**:
+- `query` es un string no vacío
+- `VITE_WEATHER_API_KEY` está definida en el entorno
 
----
+**Postcondiciones**:
+- Si la ciudad existe: retorna `WeatherData` completo
+- Si la ciudad no existe (código 1006 / HTTP 400): lanza `WeatherServiceError("NOT_FOUND")`
+- Si la API key es inválida (HTTP 401/403): lanza `WeatherServiceError("AUTH_ERROR")`
+- Si no hay red: lanza `WeatherServiceError("NETWORK_ERROR")`
+- No muta ningún estado externo
 
-### Property 1: Búsqueda dispara onSearch con el valor ingresado
-
-*Para cualquier* string no vacío escrito en el campo de búsqueda, activar la búsqueda (ya sea presionando Enter o haciendo clic en el botón) debe invocar `onSearch` exactamente una vez con ese mismo string como argumento.
-
-**Validates: Requirements 1.2, 1.3**
-
----
-
-### Property 2: Input vacío o solo-whitespace es rechazado
-
-*Para cualquier* string compuesto únicamente de caracteres de espacio en blanco (incluyendo el string vacío), intentar ejecutar la búsqueda no debe invocar `onSearch` y debe mostrar el mensaje de validación "Escribe una ciudad".
-
-**Validates: Requirements 1.4**
+**Invariante de loop**: N/A (operación única)
 
 ---
 
-### Property 3: El campo de búsqueda se limpia tras invocar onSearch
+### `addEntry(userId: number, city: string, data: WeatherData): HistoryEntry[]`
 
-*Para cualquier* string no vacío ingresado en el campo de búsqueda, después de que `onSearch` es invocado, el valor del campo de texto debe ser el string vacío.
+**Precondiciones**:
+- `userId` es un número positivo
+- `city` es un string no vacío
+- `data` es un `WeatherData` válido
 
-**Validates: Requirements 1.5**
+**Postcondiciones**:
+- La nueva entrada queda al inicio del array
+- El array resultante tiene como máximo 50 elementos
+- La entrada se persiste en `localStorage["weatherHistory_<userId>"]`
+- Retorna el array actualizado
 
----
-
-### Property 4: WeatherCard renderiza todos los campos requeridos
-
-*Para cualquier* objeto `WeatherData` válido con valores arbitrarios en sus campos, el componente `WeatherCard` debe renderizar en el DOM: el nombre de la ciudad, el país, la temperatura en °C, la sensación térmica en °C, la condición en texto, el porcentaje de humedad y la velocidad del viento en km/h.
-
-**Validates: Requirements 2.2, 2.3, 2.4, 2.5, 2.6, 2.7**
-
----
-
-### Property 5: Cada solicitud al servicio incluye la API Key y el city query
-
-*Para cualquier* string de consulta (nombre de ciudad o coordenadas), cuando `getWeather(query)` es invocado, la llamada HTTP realizada por axios debe incluir la `API_Key` como parámetro `key` y el `query` como parámetro `q` en la URL del endpoint `current.json`.
-
-**Validates: Requirements 2.1, 5.2**
+**Invariante de loop**: N/A
 
 ---
 
-### Property 6: Los errores de WeatherAPI se mapean al mensaje de usuario correcto
+### `login(email: string, password: string): Promise<User>`
 
-*Para cualquier* tipo de error de WeatherAPI (HTTP 400/código 1006, HTTP 401/403, o error de red), el mensaje mostrado en la interfaz debe corresponder exactamente al mensaje definido para ese tipo de error: "Ciudad no encontrada", "Error de autenticación con el servicio de clima", o "No se pudo conectar con el servicio de clima. Intenta de nuevo." respectivamente.
+**Precondiciones**:
+- `email` y `password` son strings no vacíos
 
-**Validates: Requirements 3.1, 3.2, 3.3**
-
----
-
-### Property 7: Un error oculta los datos climáticos previos
-
-*Para cualquier* estado de la aplicación donde `WeatherData` estaba visible, cuando ocurre cualquier error de búsqueda, el componente `WeatherCard` no debe estar presente en el DOM.
-
-**Validates: Requirements 3.4**
+**Postcondiciones**:
+- Si las credenciales son correctas: persiste el usuario en `localStorage["weatherAppCurrentUser"]` y retorna `User`
+- Si las credenciales son incorrectas: lanza `Error("Correo o contraseña incorrectos.")`
+- La contraseña nunca se incluye en el objeto `User` retornado
 
 ---
 
-### Property 8: Una búsqueda exitosa limpia el mensaje de error previo
+### `register(name, email, password, passwordConfirmation): Promise<User>`
 
-*Para cualquier* estado de la aplicación donde había un mensaje de error visible, cuando se completa una búsqueda exitosa, el mensaje de error debe desaparecer de la interfaz.
+**Precondiciones**:
+- Todos los campos son strings no vacíos
+- `password === passwordConfirmation`
+- `password.length >= 6`
+- No existe otro usuario con el mismo `email` (case-insensitive)
 
-**Validates: Requirements 3.5**
-
----
-
-### Property 9: El botón de búsqueda está deshabilitado durante la carga
-
-*Para cualquier* estado donde `loading === true`, el botón de búsqueda del componente `Search` debe tener el atributo `disabled` activo.
-
-**Validates: Requirements 4.3**
-
----
-
-### Property 10: El indicador de carga desaparece tras cualquier respuesta
-
-*Para cualquier* tipo de respuesta de la WeatherAPI (exitosa o con error), después de que la promesa se resuelve o rechaza, el indicador de carga no debe estar visible en la interfaz.
-
-**Validates: Requirements 4.2**
+**Postcondiciones**:
+- Crea un nuevo `User` con `id = Date.now()`
+- Persiste el usuario en `localStorage["weatherAppUsers"]`
+- Persiste la sesión en `localStorage["weatherAppCurrentUser"]`
+- Retorna `User` sin contraseña
 
 ---
 
-### Property 11: getWeather lanza WeatherServiceError para cualquier HTTP no-200
+## Algorithmic Pseudocode
 
-*Para cualquier* código de respuesta HTTP distinto de 200 retornado por la WeatherAPI, `getWeather` debe lanzar una instancia de `WeatherServiceError` con un `type` no vacío y un `message` descriptivo no vacío.
+### Algoritmo principal: handleSearch
 
-**Validates: Requirements 5.3**
+```pascal
+PROCEDURE handleSearch(city)
+  INPUT: city (String)
+  OUTPUT: void (actualiza estado de React)
+
+  SEQUENCE
+    IF city.trim() = "" THEN
+      RETURN  // Search.jsx ya valida esto
+    END IF
+
+    setWeatherLoading(true)
+    setWeatherError("")
+
+    TRY
+      data ← await getWeather(city)
+      setWeather(data)
+
+      entry ← await addEntry(user.id, city, data)
+      setHistory(loadHistory(user.id))
+
+    CATCH error OF TYPE WeatherServiceError
+      setWeather(null)
+      setWeatherError(error.message)
+
+    FINALLY
+      setWeatherLoading(false)
+    END TRY
+  END SEQUENCE
+END PROCEDURE
+```
 
 ---
 
-### Property 12: La geolocalización usa las coordenadas del dispositivo como query
+### Algoritmo: addEntry (historyService)
 
-*Para cualquier* par de coordenadas (latitud, longitud) retornadas por la API de geolocalización del navegador, `getWeather` debe ser invocado con esas coordenadas en el formato `"lat,lon"`.
+```pascal
+PROCEDURE addEntry(userId, city, weatherData)
+  INPUT: userId (Number), city (String), weatherData (WeatherData)
+  OUTPUT: entries (Array of HistoryEntry)
 
-**Validates: Requirements 6.2**
+  SEQUENCE
+    entries ← loadHistory(userId)  // lee de localStorage
+
+    newEntry ← {
+      id: Date.now().toString(),
+      userId: userId,
+      city: city,
+      searchedAt: new Date().toISOString(),
+      weatherSnapshot: {
+        temp_c: weatherData.current.temp_c,
+        condition: weatherData.current.condition.text,
+        icon: weatherData.current.condition.icon
+      }
+    }
+
+    entries ← [newEntry] + entries  // prepend
+
+    IF entries.length > 50 THEN
+      entries ← entries[0..49]      // truncar a 50
+    END IF
+
+    localStorage.setItem("weatherHistory_" + userId, JSON.stringify(entries))
+
+    RETURN entries
+  END SEQUENCE
+END PROCEDURE
+```
+
+**Invariante**: `entries.length ≤ 50` se mantiene tras cada inserción.
+
+---
+
+### Algoritmo: inicialización de sesión (useEffect en App.jsx)
+
+```pascal
+PROCEDURE initSession()
+  INPUT: void
+  OUTPUT: void (actualiza estado user, history)
+
+  SEQUENCE
+    setAuthLoading(true)
+
+    currentUser ← await getUser()  // lee localStorage
+
+    IF currentUser ≠ null THEN
+      setUser(currentUser)
+      history ← loadHistory(currentUser.id)
+      setHistory(history)
+    END IF
+
+    setAuthLoading(false)
+  END SEQUENCE
+END PROCEDURE
+```
 
 ---
 
 ## Error Handling
 
-### Estrategia de manejo de errores
+### Escenario 1: Ciudad no encontrada
 
-El manejo de errores sigue un flujo de dos capas:
+**Condición**: WeatherAPI retorna HTTP 400 con código de error 1006  
+**Respuesta**: `WeatherServiceError("NOT_FOUND", "Ciudad no encontrada")`  
+**UI**: Mensaje de error inline bajo el buscador; `weather` se pone a `null`  
+**Recuperación**: El usuario puede intentar con otra ciudad
 
-**Capa 1 — `weatherService.js`**: Captura errores de axios e intercepta respuestas HTTP no exitosas. Lanza `WeatherServiceError` con un `type` tipificado.
+---
 
-```js
-export async function getWeather(query) {
-  try {
-    const response = await axios.get(
-      `https://api.weatherapi.com/v1/current.json`,
-      { params: { key: import.meta.env.VITE_WEATHER_API_KEY, q: query } }
-    );
-    return response.data;
-  } catch (error) {
-    if (error.response) {
-      const status = error.response.status;
-      const code = error.response.data?.error?.code;
-      if (status === 400 || code === 1006) {
-        throw new WeatherServiceError("NOT_FOUND", "Ciudad no encontrada");
-      }
-      if (status === 401 || status === 403) {
-        throw new WeatherServiceError("AUTH_ERROR", "Error de autenticación con el servicio de clima");
-      }
-    }
-    throw new WeatherServiceError("NETWORK_ERROR", "No se pudo conectar con el servicio de clima. Intenta de nuevo.");
-  }
-}
-```
+### Escenario 2: API key inválida o expirada
 
-**Capa 2 — `App.jsx`**: Captura el `WeatherServiceError` y actualiza el estado `error` con el mensaje del error. Limpia `weather` para ocultar datos previos.
+**Condición**: WeatherAPI retorna HTTP 401 o 403  
+**Respuesta**: `WeatherServiceError("AUTH_ERROR", "Error de autenticación con el servicio de clima")`  
+**UI**: Mensaje de error; el usuario no puede buscar hasta que se corrija la key  
+**Recuperación**: Actualizar `VITE_WEATHER_API_KEY` en `.env`
 
-```js
-const handleSearch = async (city) => {
-  setLoading(true);
-  setError("");
-  try {
-    const data = await getWeather(city);
-    setWeather(data);
-  } catch (err) {
-    setWeather(null);
-    setError(err.message ?? "Error desconocido");
-  } finally {
-    setLoading(false);
-  }
-};
-```
+---
 
-### Casos de error cubiertos
+### Escenario 3: Sin conexión a internet
 
-| Escenario | Origen | Mensaje al usuario |
-|---|---|---|
-| Ciudad no encontrada | WeatherAPI HTTP 400 / code 1006 | "Ciudad no encontrada" |
-| API Key inválida | WeatherAPI HTTP 401/403 | "Error de autenticación con el servicio de clima" |
-| Sin conexión / timeout | axios network error | "No se pudo conectar con el servicio de clima. Intenta de nuevo." |
-| Campo vacío | Validación en Search | "Escribe una ciudad" |
-| Geolocalización denegada | Browser Geolocation API | "Permiso de ubicación denegado" |
-| Navegador sin geolocalización | `navigator.geolocation === undefined` | Botón oculto (sin mensaje) |
+**Condición**: La llamada axios falla sin respuesta del servidor  
+**Respuesta**: `WeatherServiceError("NETWORK_ERROR", "No se pudo conectar...")`  
+**UI**: Mensaje de error con sugerencia de verificar conexión  
+**Recuperación**: El usuario reintenta cuando recupere conectividad
 
-### Geolocalización
+---
 
-```js
-const handleLocation = () => {
-  if (!navigator.geolocation) return; // botón no se muestra (Req 6.4)
-  navigator.geolocation.getCurrentPosition(
-    async ({ coords }) => {
-      await handleSearch(`${coords.latitude},${coords.longitude}`);
-    },
-    () => {
-      setError("Permiso de ubicación denegado"); // Req 6.3
-    }
-  );
-};
-```
+### Escenario 4: Email duplicado en registro
+
+**Condición**: `localAuth.register()` encuentra un usuario con el mismo email  
+**Respuesta**: `Error("Ya existe un usuario con ese correo.")`  
+**UI**: Mensaje de error en el formulario de registro  
+**Recuperación**: El usuario usa otro email o va a login
+
+---
+
+### Escenario 5: localStorage no disponible
+
+**Condición**: El navegador bloquea el acceso a localStorage (modo privado extremo, políticas de seguridad)  
+**Respuesta**: Capturar `SecurityError` en los servicios y retornar estado vacío  
+**UI**: Advertencia de que la persistencia no está disponible  
+**Recuperación**: La app funciona en modo sin persistencia (sesión en memoria)
 
 ---
 
 ## Testing Strategy
 
-### Enfoque dual: Unit tests + Property-based tests
+### Unit Testing (Vitest + Testing Library)
 
-La estrategia combina tests de ejemplo para casos concretos y tests de propiedades para verificar invariantes sobre un amplio espacio de entradas.
+El proyecto ya tiene Vitest configurado con `fast-check` para property-based testing.
 
-### Herramientas
+**Archivos existentes a mantener/extender**:
+- `src/services/weatherService.test.js`
+- `src/services/authService.test.js`
+- `src/components/Search.test.jsx`
+- `src/components/WeatherCard.test.jsx`
 
-| Herramienta | Propósito |
-|---|---|
-| **Vitest** | Test runner (compatible con Vite) |
-| **React Testing Library** | Renderizado y queries de componentes |
-| **fast-check** | Property-based testing (PBT) |
-| **@testing-library/user-event** | Simulación de interacciones de usuario |
-| **vi.mock / vi.fn** | Mocking de axios y APIs del navegador |
+**Nuevos archivos de test**:
+- `src/services/historyService.test.js`
+- `src/components/SearchHistory.test.jsx`
 
-### Tests unitarios (ejemplo-based)
+**Casos clave por módulo**:
 
-Cubren casos concretos, puntos de integración y edge cases:
+| Módulo | Caso de prueba |
+|--------|---------------|
+| `localAuth.js` | Registro exitoso, email duplicado, contraseñas no coinciden, login correcto, login con credenciales incorrectas, logout limpia localStorage |
+| `weatherService.js` | Respuesta exitosa, ciudad no encontrada (400/1006), error de auth (401), error de red |
+| `historyService.js` | Agregar entrada, límite de 50 entradas, limpiar historial, cargar historial vacío |
+| `Search.jsx` | Envío con ciudad válida, envío con campo vacío muestra error, deshabilita botón en loading |
+| `WeatherCard.jsx` | Renderiza datos correctamente, retorna null si data es null |
+| `SearchHistory.jsx` | Lista entradas, clic en entrada llama onSelect, botón limpiar llama onClear |
 
-- `Search` renderiza input y botón (Req 1.1)
-- `App` muestra el botón de geolocalización cuando el navegador lo soporta (Req 6.1)
-- `App` oculta el botón de geolocalización cuando no hay soporte (Req 6.4)
-- `App` muestra "Permiso de ubicación denegado" cuando se deniega (Req 6.3)
-- `weatherService` usa axios para las solicitudes (Req 5.4)
-- Indicador de carga visible durante solicitud activa (Req 4.1)
+### Property-Based Testing (fast-check)
 
-### Tests de propiedades (property-based)
+**Librería**: `fast-check` (ya instalada)
 
-Cada propiedad del diseño se implementa como un test de fast-check con mínimo **100 iteraciones**. Cada test incluye un comentario de trazabilidad:
+**Propiedades a verificar**:
 
-```js
-// Feature: weather-app-react, Property 4: WeatherCard renderiza todos los campos requeridos
-test("WeatherCard renders all required fields for any WeatherData", () => {
-  fc.assert(
-    fc.property(arbitraryWeatherData(), (data) => {
-      const { getByText } = render(<WeatherCard data={data} />);
-      expect(getByText(new RegExp(data.current.temp_c))).toBeInTheDocument();
-      expect(getByText(new RegExp(data.current.feelslike_c))).toBeInTheDocument();
-      expect(getByText(data.current.condition.text)).toBeInTheDocument();
-      expect(getByText(new RegExp(data.current.humidity))).toBeInTheDocument();
-      expect(getByText(new RegExp(data.current.wind_kph))).toBeInTheDocument();
-      expect(getByText(new RegExp(data.location.name))).toBeInTheDocument();
-      expect(getByText(new RegExp(data.location.country))).toBeInTheDocument();
-    }),
-    { numRuns: 100 }
-  );
-});
+```javascript
+// Propiedad 1: El historial nunca supera 50 entradas
+fc.property(
+  fc.array(fc.string({ minLength: 1 }), { minLength: 1, maxLength: 100 }),
+  (cities) => {
+    cities.forEach(city => addEntry(1, city, mockWeatherData))
+    const history = loadHistory(1)
+    return history.length <= 50
+  }
+)
+
+// Propiedad 2: El usuario registrado siempre puede hacer login
+fc.property(
+  fc.record({ name: fc.string({ minLength: 1 }), email: fc.emailAddress(), password: fc.string({ minLength: 6 }) }),
+  async ({ name, email, password }) => {
+    await register(name, email, password, password)
+    const user = await login(email, password)
+    return user.email === email
+  }
+)
+
+// Propiedad 3: getWeather con ciudad vacía siempre lanza error
+fc.property(
+  fc.constant(""),
+  async (emptyCity) => {
+    // La validación en Search.jsx previene esto, pero el servicio también debe ser robusto
+    try { await getWeather(emptyCity); return false }
+    catch { return true }
+  }
+)
 ```
 
-### Generadores fast-check para el dominio
+### Integration Testing
 
-```js
-// Generador de WeatherData arbitrario
-const arbitraryWeatherData = () =>
-  fc.record({
-    location: fc.record({
-      name: fc.string({ minLength: 1, maxLength: 50 }),
-      country: fc.string({ minLength: 1, maxLength: 50 }),
-    }),
-    current: fc.record({
-      temp_c: fc.float({ min: -60, max: 60 }),
-      feelslike_c: fc.float({ min: -60, max: 60 }),
-      humidity: fc.integer({ min: 0, max: 100 }),
-      wind_kph: fc.float({ min: 0, max: 300 }),
-      condition: fc.record({
-        text: fc.string({ minLength: 1 }),
-        icon: fc.constant("//cdn.weatherapi.com/weather/64x64/day/116.png"),
-        code: fc.integer({ min: 1000, max: 1300 }),
-      }),
-    }),
-  });
+- Flujo completo: registro → login → búsqueda → historial guardado → logout → login → historial recuperado
+- Flujo de error: búsqueda con ciudad inválida → mensaje de error → nueva búsqueda exitosa
 
-// Generador de strings whitespace-only
-const arbitraryWhitespaceString = () =>
-  fc.stringOf(fc.constantFrom(" ", "\t", "\n", "\r"));
+---
 
-// Generador de coordenadas geográficas
-const arbitraryCoordinates = () =>
-  fc.record({
-    latitude: fc.float({ min: -90, max: 90 }),
-    longitude: fc.float({ min: -180, max: 180 }),
-  });
-```
+## Performance Considerations
 
-### Cobertura por requisito
+- **Caché de búsquedas recientes**: Evitar llamadas repetidas a la API para la misma ciudad en un intervalo corto (p. ej. 5 minutos). Almacenar el resultado en memoria con timestamp.
+- **Debounce en el buscador**: No es necesario (la búsqueda es por submit, no por keystroke), pero considerar si se agrega autocompletado.
+- **Tamaño del historial**: Limitar a 50 entradas por usuario evita que localStorage crezca indefinidamente.
+- **Lazy loading de Forecast**: El componente `Forecast` solo se renderiza si hay datos; considerar cargarlo solo cuando el usuario lo solicite explícitamente.
 
-| Requisito | Tipo de test | Propiedad |
-|---|---|---|
-| 1.1 | Unit (example) | — |
-| 1.2, 1.3 | Property | Property 1 |
-| 1.4 | Property | Property 2 |
-| 1.5 | Property | Property 3 |
-| 2.1, 5.2 | Property | Property 5 |
-| 2.2–2.7 | Property | Property 4 |
-| 3.1, 3.2, 3.3 | Property | Property 6 |
-| 3.4 | Property | Property 7 |
-| 3.5 | Property | Property 8 |
-| 4.1 | Unit (example) | — |
-| 4.2 | Property | Property 10 |
-| 4.3 | Property | Property 9 |
-| 5.1 | Property | Property 5 |
-| 5.3 | Property | Property 11 |
-| 5.4 | Unit (example) | — |
-| 6.1 | Unit (example) | — |
-| 6.2 | Property | Property 12 |
-| 6.3 | Unit (example) | — |
-| 6.4 | Unit (example) | — |
+---
+
+## Security Considerations
+
+- **Contraseñas en localStorage**: Las contraseñas se almacenan en texto plano en `localStorage["weatherAppUsers"]`. Esto es aceptable para un proyecto de demostración/aprendizaje, pero en producción se debe usar hashing (bcrypt) o un backend real.
+- **API Key expuesta**: `VITE_WEATHER_API_KEY` queda embebida en el bundle de producción. Para producción real, las llamadas a la API deben pasar por un proxy backend.
+- **XSS**: React escapa automáticamente el contenido renderizado. No se usa `dangerouslySetInnerHTML`.
+- **CORS**: Las llamadas a WeatherAPI.com son cross-origin; la API lo permite explícitamente desde el navegador.
+- **Validación de inputs**: Todos los formularios validan en el cliente antes de enviar. Los datos de la API externa se tratan como no confiables y solo se accede a campos conocidos.
+
+---
+
+## Dependencies
+
+| Dependencia | Versión | Uso |
+|-------------|---------|-----|
+| `react` | ^19.2.6 | Framework UI |
+| `react-dom` | ^19.2.6 | Renderizado en el DOM |
+| `react-router-dom` | ^7.15.1 | Navegación SPA |
+| `axios` | ^1.15.2 | Llamadas HTTP a WeatherAPI |
+| `vite` | ^8.0.10 | Build tool y dev server |
+| `vitest` | ^4.1.6 | Test runner |
+| `@testing-library/react` | ^16.3.2 | Testing de componentes |
+| `fast-check` | ^4.7.0 | Property-based testing |
+
+**API externa**:
+- [WeatherAPI.com](https://www.weatherapi.com/) — endpoint `/current.json` (clima actual) y `/forecast.json` (pronóstico)
+- Requiere `VITE_WEATHER_API_KEY` en `.env`
