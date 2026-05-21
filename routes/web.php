@@ -1,49 +1,34 @@
 <?php
 
-use App\Http\Controllers\ProfileController;
 use Illuminate\Support\Facades\Route;
-use App\Http\Controllers\FavoriteLocationController; // Mantener si decides usar el CRUD después
-use App\Http\Controllers\WeatherController;
-use Illuminate\Support\Facades\Auth; // Asegurar que Auth está disponible
+use App\Http\Controllers\Auth\AuthenticatedSessionController;
+use App\Http\Controllers\Auth\RegisteredUserController;
+use App\Http\Controllers\Auth\PasswordResetLinkController;
+use App\Http\Controllers\Auth\NewPasswordController;
 
-/*
-|--------------------------------------------------------------------------
-| Rutas Web
-|--------------------------------------------------------------------------
-*/
+// Rutas de Login y Registro
+Route::get('login', [AuthenticatedSessionController::class, 'create'])
+    ->name('login');
 
-// Ruta de Bienvenida
-Route::get('/', function () {
-    return view('welcome');
-});
+Route::post('login', [AuthenticatedSessionController::class, 'store']);
 
-// 1. RUTA PRINCIPAL (DASHBOARD/CLIMA)
-// 💡 CORRECCIÓN: Esta ruta está ahora FUERA del grupo 'auth', haciéndola pública.
-Route::get('/dashboard', [WeatherController::class, 'showWeather'])->name('dashboard');
+Route::get('register', [RegisteredUserController::class, 'create'])
+    ->name('register');
 
+Route::post('register', [RegisteredUserController::class, 'store']);
 
-/*
-|--------------------------------------------------------------------------
-| Rutas Protegidas (Middleware 'auth')
-|--------------------------------------------------------------------------
-*/
+Route::post('logout', [AuthenticatedSessionController::class, 'destroy'])
+    ->name('logout');
 
-Route::middleware(['auth', 'verified'])->group(function () {
-    
-    // 2. RUTAS DE PERFIL
-    Route::get('/profile', [ProfileController::class, 'edit'])->name('profile.edit');
-    Route::patch('/profile', [ProfileController::class, 'update'])->name('profile.update');
-    Route::delete('/profile', [ProfileController::class, 'destroy'])->name('profile.destroy');
-    // 3. RUTAS DE PERFIL
-    Route::get('/profile', [ProfileController::class, 'edit'])->name('profile.edit');
-    Route::patch('/profile', [ProfileController::class, 'update'])->name('profile.update');
-    Route::delete('/profile', [ProfileController::class, 'destroy'])->name('profile.destroy');
-    
-    // 4. RUTAS DEL CRUD (Si las vas a usar)
-    // Si la funcionalidad de CRUD de ubicaciones es secundaria a la búsqueda dinámica, mantenemos esto:
-    // Route::resource('locations', FavoriteLocationController::class);
+// Password Reset (opcional)
+Route::get('forgot-password', [PasswordResetLinkController::class, 'create'])
+    ->name('password.request');
 
-});
+Route::post('forgot-password', [PasswordResetLinkController::class, 'store'])
+    ->name('password.email');
 
-// Rutas de Autenticación
-require __DIR__.'/auth.php';
+Route::get('reset-password/{token}', [NewPasswordController::class, 'create'])
+    ->name('password.reset');
+
+Route::post('reset-password', [NewPasswordController::class, 'store'])
+    ->name('password.update');
